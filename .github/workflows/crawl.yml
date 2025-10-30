@@ -1,34 +1,26 @@
-
-name: AVDBS Crawler
+name: AVDBS t50 Bot (v7.8)
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/12 * * * *"     # 12분마다 (t22와 살짝 엇갈리게)
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write              # state 파일 푸시
 
 concurrency:
-  group: avdbs-crawler
+  group: avdbs-t50
   cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout (full)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Git identity
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Pull latest (best-effort)
-        run: git pull --rebase || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -36,27 +28,49 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
 
-      - name: Run crawler
+      # (선택) 수동 실행시 봇 정상여부 체크
+      - name: Telegram self-test
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Choose ONE auth method below:
-          # 1) Login with ID/PW (recommended)
-          AVDBS_ID: ${{ secrets.AVDBS_ID }}
-          AVDBS_PW: ${{ secrets.AVDBS_PW }}
-          # 2) Or provide manual cookie string (e.g., "PHPSESSID=...; adult_chk=1; ...")
-          AVDBS_COOKIE: ${{ secrets.AVDBS_COOKIE }}
-          # Optional heartbeat
-          # ENABLE_HEARTBEAT: ${{ vars.ENABLE_HEARTBEAT }}
-        run: python -u main.py
+        run: |
+          curl -s --get \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=✅ Telegram self-test (AVDBS t50 v7.8)" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" || true
 
-      - name: Commit state if changed
+      # 쿠키 프리체크: t50 페이지 접근 가능?
+      - name: AVDBS cookie self-test (t50)
+        env:
+          AVDBS_COOKIE: ${{ secrets.AVDBS_COOKIE }}
+        run: |
+          echo "== /board/t50 with cookie =="
+          curl -s -H "Cookie: ${AVDBS_COOKIE}" https://www.avdbs.com/board/t50 | head -n 60
+
+      - name: Run crawler (t50)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}  # 분리 원하면 여기 다른 CHAT_ID 시크릿을 연결
+          AVDBS_BASE: "https://www.avdbs.com"
+          AVDBS_BOARD_PATH: "/board/t50"
+          AVDBS_COOKIE: ${{ secrets.AVDBS_COOKIE }}
+          FORCE_SEND_LATEST: "0"
+          RESET_SEEN: "0"
+          TRACE_IMAGE_DEBUG: "0"
+        run: |
+          python -u main_t50.py
+
+      - name: Commit state if changed (t50)
         run: |
           if [ -n "$(git status --porcelain)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
             git add state/ || true
-            git commit -m "chore(state): update seen_ids [skip ci]" || true
+            git commit -m "chore(state): update t50 seen_ids [skip ci]" || true
             git pull --rebase || true
             git push || true
           else
