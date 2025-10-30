@@ -1,354 +1,331 @@
-
-import os
-import re
-import json
-import time
-import pathlib
-import hashlib
-from urllib.parse import urljoin, urlparse, parse_qs
-
+import os, re, time, pathlib
+from io import BytesIO
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
 import requests
 from bs4 import BeautifulSoup
 
-# ========= Telegram Secrets =========
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# ===== Telegram =====
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # t22와 같은 방을 써도 되고, 분리하고 싶으면 다른 CHAT_ID 사용
 
-# ========= AVDBS Settings (this project is dedicated to: /board/t50) =========
-AVDBS_BASE  = "https://www.avdbs.com"
-LIST_PATH   = "/board/t50"
-T_CODE      = "t50"  # used for dedup key
+# ===== Target =====
+AVDBS_BASE = os.getenv("AVDBS_BASE", "https://www.avdbs.com").rstrip("/")
+AVDBS_BOARD_PATH = os.getenv("AVDBS_BOARD_PATH", "/board/t50")  # ← t50 기본값
+LIST_URL = f"{AVDBS_BASE}{AVDBS_BOARD_PATH}"
 
-# Optional auth (recommended to see full content)
-AVDBS_ID     = os.getenv("AVDBS_ID", "").strip()
-AVDBS_PW     = os.getenv("AVDBS_PW", "").strip()
-AVDBS_COOKIE = os.getenv("AVDBS_COOKIE", "").strip()  # "PHPSESSID=...; adult_chk=1; ..."
+# ===== Auth =====
+AVDBS_COOKIE = os.getenv("AVDBS_COOKIE", "").strip()
 
-# ========= State / Heartbeat =========
-SEEN_FILE = os.getenv("SEEN_SET_FILE", "state/seen_ids.txt")  # key format: avdbs:{t_code}:{sha1(url)}
-ENABLE_HEARTBEAT = os.getenv("ENABLE_HEARTBEAT", "0").strip() == "1"
-HEARTBEAT_TEXT   = os.getenv("HEARTBEAT_TEXT", "🧪 Heartbeat: bot is alive.")
+# ===== Runtime / State =====
+TIMEOUT = 25
+TRACE_IMAGE_DEBUG = os.getenv("TRACE_IMAGE_DEBUG", "0").strip() == "1"
+FORCE_SEND_LATEST = os.getenv("FORCE_SEND_LATEST", "0").strip() == "1"
+RESET_SEEN = os.getenv("RESET_SEEN", "0").strip() == "1"
+SEEN_FILE = os.getenv("SEEN_SET_FILE", "state/avdbs_t50_seen.txt")  # ← t50 전용 state
 
-# ========= HTTP =========
+# ===== Filters =====
+EXCLUDE_IMAGE_SUBSTRINGS = [
+    "/logo/", "/banner/", "/ads/", "/noimage", "/favicon", "/thumb/",
+    "/placeholder/", "/loading", ".svg",
+    "/img/level/", "mb3_", "avdbs_logo", "main-search", "new_9x9w.png",
+    "/img/19cert/", "19_cert", "19_popup",
+]
+ALLOWED_IMG_DOMAINS = {"avdbs.com", "www.avdbs.com", "i1.avdbs.com"}
+CONTENT_PATH_ALLOW_RE = re.compile(r"/(data|upload|board|files?|attach)/", re.I)
+
+BOILERPLATE_RE = re.compile(
+    r"(로그아웃|마이페이지|모바일앱|연예정보|배우\s*순위|품번\s*검색|한줄평/추천|질문답변\s*커뮤니티|인기\s*게시글\s*전체\s*게시글)",
+    re.I
+)
+
+# ===== HTTP =====
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (compatible; AVDBS-t50-bot/1.0; +https://github.com/your/repo)",
-    "Accept-Language": "ko,ko-KR;q=0.9,en;q=0.8",
+    "User-Agent": "Mozilla/5.0 (compatible; AVDBS-t50Bot/7.8)",
+    "Accept-Language": "ko,en;q=0.8",
     "Connection": "close",
-    "Referer": AVDBS_BASE,
 })
-TIMEOUT = 20
 
+# ===== State =====
 def ensure_state_dir():
     pathlib.Path("state").mkdir(parents=True, exist_ok=True)
 
-def load_seen() -> set:
+def load_seen() -> set[str]:
     ensure_state_dir()
-    s = set()
+    if RESET_SEEN:
+        print("[debug] RESET_SEEN=1 → fresh run")
+        return set()
     p = pathlib.Path(SEEN_FILE)
-    if p.exists():
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        s.add(line)
-        except Exception:
-            pass
-    return s
+    if not p.exists():
+        return set()
+    with open(p, "r", encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip()}
 
 def append_seen(keys: list[str]):
-    if not keys:
-        return
+    if not keys: return
     ensure_state_dir()
     with open(SEEN_FILE, "a", encoding="utf-8") as f:
-        for k in keys:
-            f.write(k + "\n")
+        for k in keys: f.write(k + "\n")
 
-def get_encoding_safe_text(resp: requests.Response) -> str:
-    if not resp.encoding or resp.encoding.lower() in ("iso-8859-1", "ansi_x3.4-1968"):
-        resp.encoding = resp.apparent_encoding or "utf-8"
-    return resp.text
-
-def absolutize(base: str, url: str) -> str:
-    if not url:
-        return ""
-    if url.startswith("//"):
-        return "https:" + url
-    return urljoin(base, url)
-
-def sha1(s: str) -> str:
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
-
-# ---------- AVDBS auth helpers ----------
-def set_manual_cookie(cookie_str: str):
-    # "a=1; b=2;" → session cookies
-    for part in cookie_str.split(";"):
+# ===== Cookies (site + CDN) =====
+def cookie_string_to_jar(raw: str) -> requests.cookies.RequestsCookieJar:
+    jar = requests.cookies.RequestsCookieJar()
+    base_host = urlparse(AVDBS_BASE).hostname or "www.avdbs.com"
+    cdn_host  = "i1.avdbs.com"
+    for part in raw.split(";"):
         part = part.strip()
-        if not part or "=" not in part:
-            continue
+        if not part or "=" not in part: continue
         k, v = part.split("=", 1)
-        SESSION.cookies.set(k.strip(), v.strip(), domain=urlparse(AVDBS_BASE).netloc)
+        k, v = k.strip(), v.strip()
+        for dom in (base_host, "." + base_host.lstrip("."), cdn_host, "." + cdn_host):
+            jar.set(k, v, domain=dom)
+    return jar
 
-def is_login_wall(html: str) -> bool:
-    h = html.lower()
-    return ("로그인" in h and "회원" in h) or ("성인" in h and "인증" in h) or ("login" in h and "member" in h)
-
-def try_login() -> bool:
-    SESSION.headers["Referer"] = AVDBS_BASE
-    SESSION.cookies.set("adult_chk", "1", domain=urlparse(AVDBS_BASE).netloc)
-
-    candidates = [
-        ("https://www.avdbs.com/member/login", {"user_id": AVDBS_ID, "user_pw": AVDBS_PW}),
-        ("https://www.avdbs.com/member/login", {"mb_id": AVDBS_ID, "mb_password": AVDBS_PW}),
-        ("https://www.avdbs.com/login",        {"id": AVDBS_ID, "pw": AVDBS_PW}),
-    ]
-    for url, payload in candidates:
-        try:
-            r = SESSION.post(url, data=payload, timeout=TIMEOUT)
-            html = get_encoding_safe_text(r).lower()
-            if r.status_code == 200 and ("logout" in html or "로그아웃" in html or "my page" in html):
-                print(f"[avdbs] login success via {url}")
-                return True
-            if r.status_code in (301, 302, 303, 307, 308):
-                home = SESSION.get(AVDBS_BASE, timeout=TIMEOUT)
-                h = get_encoding_safe_text(home).lower()
-                if "logout" in h or "로그아웃" in h or "my page" in h:
-                    print(f"[avdbs] login success (redirect) via {url}")
-                    return True
-        except Exception as e:
-            print(f"[avdbs] login attempt failed: {url} err={e}")
-    print("[avdbs] login failed")
-    return False
-
-def avdbs_get(url: str) -> requests.Response:
+def apply_cookies():
     if AVDBS_COOKIE:
-        set_manual_cookie(AVDBS_COOKIE)
-    r = SESSION.get(url, timeout=TIMEOUT)
-    html = get_encoding_safe_text(r)
-    if r.status_code in (401, 403) or is_login_wall(html):
-        print("[avdbs] login wall detected → login")
-        ok = False
-        if AVDBS_ID and AVDBS_PW:
-            ok = try_login()
-        elif AVDBS_COOKIE:
-            print("[avdbs] provided cookie seems invalid/expired")
-        if ok:
-            r = SESSION.get(url, timeout=TIMEOUT)
-    return r
+        SESSION.cookies.update(cookie_string_to_jar(AVDBS_COOKIE))
+        ck = AVDBS_COOKIE.lower()
+        if "adult_chk=1" not in ck and "adult=ok" not in ck:
+            print("[warn] adult cookie not found → placeholders/login may appear")
+    else:
+        print("[warn] AVDBS_COOKIE not provided")
 
-# ---------- Parsing ----------
-def fetch_list() -> list[dict]:
-    base_url = urljoin(AVDBS_BASE, LIST_PATH)
-    r = avdbs_get(base_url)
-    html = get_encoding_safe_text(r)
-    soup = BeautifulSoup(html, "html.parser")
-
-    posts = {}
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        absu = absolutize(base_url, href)
-        u = urlparse(absu)
-        if u.netloc != urlparse(AVDBS_BASE).netloc:
+# ===== URL canonicalization & filters =====
+def canon_url_remove_noise(u: str) -> str:
+    pr = urlparse(u)
+    if not pr.query: return u
+    kept = []
+    for k, v in parse_qsl(pr.query, keep_blank_values=True):
+        if k.lower() in {"reply", "sort", "page", "s", "g"}:  # 잡쿼리 제거
             continue
-        if u.path.rstrip("/") == urlparse(base_url).path.rstrip("/"):
-            continue
-        if "page=" in u.query.lower():
-            continue
-        if "/board/" not in u.path:
-            continue
-        title = a.get_text(strip=True) or (u.path.rstrip("/").split("/")[-1] or absu)
-        key = sha1(absu)
-        if key not in posts or (title and len(title) > len(posts[key]["title"])):
-            posts[key] = {"url": absu, "title": title}
-    res = list(posts.values())
-    print(f"[debug] list fetched({LIST_PATH}): {len(res)} items")
-    return res
+        kept.append((k, v))
+    new_q = urlencode(kept, doseq=True)
+    return urlunparse((pr.scheme, pr.netloc, pr.path, pr.params, new_q, pr.fragment))
 
-def text_summary_from_html(soup: BeautifulSoup, max_chars: int = 280) -> str:
-    candidates = [".xe_content", "#bd_view", ".rd_body", "article", "#bo_v_con", ".bo_v_con", "div.view_content"]
-    container = None
-    for sel in candidates:
-        node = soup.select_one(sel)
-        if node:
-            container = node
-            break
-    if container is None:
-        container = soup
-    for tag in container(["script", "style", "noscript"]):
-        tag.extract()
-    text = container.get_text(" ", strip=True)
-    text = re.sub(r"\s+", " ", text).strip()
-    return (text[:max_chars - 1] + "…") if (text and len(text) > max_chars) else (text or "")
+ARTICLE_URL_RE = re.compile(r"^/board/\d+(?:\?.*)?$", re.I)  # /board/숫자
+BOARD_TAB_RE   = re.compile(r"^/board/t\d+(?:/|$)", re.I)    # /board/txx
 
-def fetch_content_media_and_summary(post_url: str) -> dict:
-    r = avdbs_get(post_url)
-    html = get_encoding_safe_text(r)
-    soup = BeautifulSoup(html, "html.parser")
+def is_article_url(href: str, base: str) -> str | None:
+    if not href: return None
+    full = urljoin(base, href.strip())
+    u = urlparse(full)
+    if u.netloc not in {"www.avdbs.com", "avdbs.com"}: return None
+    if BOARD_TAB_RE.match(u.path): return None
+    if ARTICLE_URL_RE.match(u.path): return full
+    return None
 
-    summary = text_summary_from_html(soup, max_chars=280)
+# ===== Helpers =====
+def absolutize(base_url: str, url: str) -> str:
+    if not url: return ""
+    if url.startswith("//"): return "https:" + url
+    return urljoin(base_url, url)
 
-    candidates = [".xe_content", "#bd_view", ".rd_body", "article", "#bo_v_con", ".bo_v_con", "div.view_content"]
-    container = None
-    for sel in candidates:
-        node = soup.select_one(sel)
-        if node:
-            container = node
-            break
-    if container is None:
-        container = soup
+def is_excluded_image(url: str) -> bool:
+    low = url.lower()
+    return any(h in low for h in EXCLUDE_IMAGE_SUBSTRINGS)
 
-    images = []
-    for img in container.find_all("img"):
-        src = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("data-echo")
-        if not src:
-            continue
-        images.append(absolutize(post_url, src))
-
-    video_exts = (".mp4", ".mov", ".webm", ".mkv", ".m4v")
-    videos = []
-    for v in container.find_all(["video", "source"]):
-        src = v.get("src")
-        if not src:
-            continue
-        src = absolutize(post_url, src)
-        if any(src.lower().endswith(ext) for ext in video_exts):
-            videos.append(src)
-
-    iframes = []
-    for f in container.find_all("iframe"):
-        src = f.get("src")
-        if src:
-            iframes.append(absolutize(post_url, src))
-
-    images = list(dict.fromkeys(images))
-    videos = list(dict.fromkeys(videos))
-    iframes = list(dict.fromkeys(iframes))
-
-    title = None
-    ogt = soup.find("meta", property="og:title")
-    if ogt and ogt.get("content"):
-        title = ogt.get("content").strip()
-    if not title and soup.title and soup.title.string:
-        title = soup.title.string.strip()
-
-    return {"images": images, "videos": videos, "iframes": iframes, "summary": summary, "title_override": title}
-
-# ---------- Telegram ----------
-def tg_post(method: str, data: dict):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-    r = requests.post(url, data=data, timeout=20)
+def is_content_image(url: str) -> bool:
     try:
-        j = r.json()
+        u = urlparse(url)
+        host = (u.hostname or "").lower()
+        if host not in ALLOWED_IMG_DOMAINS: return False
+        if not CONTENT_PATH_ALLOW_RE.search(u.path or ""): return False
     except Exception:
-        j = {"non_json_body": r.text[:500]}
-    print(f"[tg] {method} status={r.status_code} ok={j.get('ok')} desc={j.get('description')}")
-    return r, j
+        return False
+    return not is_excluded_image(url)
+
+def download_bytes(url: str, referer: str) -> bytes | None:
+    try:
+        headers = {
+            "Referer": referer,  # 글 URL
+            "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+        }
+        r = SESSION.get(url, headers=headers, timeout=TIMEOUT)
+        if r.status_code == 200 and r.content: return r.content
+        print(f"[warn] download {r.status_code}: {url}")
+    except Exception as e:
+        print(f"[warn] download failed: {url} err={e}")
+    return None
+
+def tg_post(method: str, data: dict, files=None):
+    r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}", data=data, files=files, timeout=60)
+    try: ok = r.json().get("ok", None)
+    except Exception: ok = None
+    print(f"[tg] {method} {r.status_code} ok={ok}")
+    return r
 
 def tg_send_text(text: str):
     return tg_post("sendMessage", {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False
+        "disable_web_page_preview": True,
     })
 
-def tg_send_media_group(media_items: list[dict]):
-    return tg_post("sendMediaGroup", {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "media": json.dumps(media_items, ensure_ascii=False)
-    })
+def send_photo_file(bytes_data: bytes, caption: str | None):
+    return tg_post("sendPhoto",
+                   {"chat_id": TELEGRAM_CHAT_ID, "caption": caption or "", "parse_mode": "HTML"},
+                   files={"photo": ("image.jpg", BytesIO(bytes_data))})
 
-def build_caption(title: str, url: str, summary: str, batch_idx: int | None, total_batches: int | None) -> str:
-    prefix = f"📌 <b>{title}</b>"
-    if batch_idx is not None and total_batches is not None and total_batches > 1:
-        prefix += f"  ({batch_idx}/{total_batches})"
-    body = f"\n{summary}" if summary else ""
-    suffix = f"\n{url}"
-    caption = f"{prefix}{body}{suffix}"
-    if len(caption) > 900:
-        caption = caption[:897] + "…"
-    return caption
+# ===== Gate detection & container =====
+def is_login_gate(resp, soup) -> bool:
+    final_url = getattr(resp, "url", "") or ""
+    title_txt = (soup.title.string.strip() if soup.title and soup.title.string else "")
+    big_text = soup.get_text(" ", strip=True)[:2000]
+    if "/login" in final_url: return True
+    if "AVDBS" in title_txt and "로그인" in title_txt: return True
+    if soup.find("input", {"name": "mb_id"}) and soup.find("input", {"name": "mb_password"}): return True
+    if ("성인 인증" in big_text) and ("로그인" in big_text): return True
+    return False
 
-# ---------- Main ----------
+def pick_main_container(soup: BeautifulSoup):
+    for sel in ["#bo_v_con", "#view_content", ".view_content", ".board_view", "article"]:
+        node = soup.select_one(sel)
+        if node: return node
+    return soup
+
+def strip_layout(node: BeautifulSoup):
+    kill_selectors = [
+        "header","nav","footer",".gnb",".snb",".side",".sidebar",".category",".tags",".tag",".btn",".btns",
+        ".bo_v_nb",".bo_v_com",".bo_v_sns",".comment",".reply",".writer-info",".meta",".tool",".share"
+    ]
+    for sel in kill_selectors:
+        for el in node.select(sel):
+            el.extract()
+
+def summarize_text(node, max_chars=220) -> str:
+    strip_layout(node)
+    for t in node(["script","style","noscript"]): t.extract()
+    text = re.sub(r"\s+", " ", node.get_text(" ", strip=True))
+    text = BOILERPLATE_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_chars: text = text[:max_chars] + "…"
+    return text
+
+# ===== Preflight: cookie really works? =====
+def preflight_auth() -> bool:
+    r = SESSION.get(LIST_URL, timeout=TIMEOUT, headers={"Referer": AVDBS_BASE + "/"})
+    r.encoding = r.apparent_encoding or "utf-8"
+    head = r.text[:4000]
+    if ("로그인" in head and "AVDBS" in head) or ("성인 인증" in head):
+        print("[fatal] cookie invalid or expired → login/adult gate detected")
+        try:
+            tg_send_text("⚠️ AVDBS 쿠키가 만료/미적용 같습니다. `AVDBS_COOKIE`를 새로 갱신해 주세요. (t50)")
+        except Exception:
+            pass
+        return False
+    return True
+
+# ===== Parsing =====
+def parse_list() -> list[dict]:
+    r = SESSION.get(LIST_URL, timeout=TIMEOUT, headers={"Referer": AVDBS_BASE + "/"})
+    r.encoding = r.apparent_encoding or "utf-8"
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    posts = {}
+    for a in soup.find_all("a", href=True):
+        art = is_article_url(a["href"], LIST_URL)
+        if not art: continue
+        art = canon_url_remove_noise(art)
+        title = a.get_text(strip=True) or "(제목 없음)"
+        if art not in posts or len(title) > len(posts[art]["title"]):
+            posts[art] = {"url": art, "title": title}
+
+    res = list(posts.values())
+    res.sort(key=lambda x: x["url"], reverse=True)
+    print(f"[debug] (t50) list collected (articles only): {len(res)} items")
+    return res
+
+def parse_post(url: str):
+    resp = SESSION.get(url, timeout=TIMEOUT, headers={"Referer": url})
+    resp.encoding = resp.apparent_encoding or "utf-8"
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    if is_login_gate(resp, soup):
+        print(f"[warn] login/adult gate detected, skip: {url}")
+        return None
+
+    container = pick_main_container(soup)
+    summary = summarize_text(container)
+    title = soup.title.string.strip() if soup.title and soup.title.string else "(제목 없음)"
+
+    images = []
+    for img in container.find_all("img"):
+        src = img.get("src") or img.get("data-src") or img.get("data-original") or img.get("data-echo")
+        if not src: continue
+        full = absolutize(url, src)
+        if is_content_image(full): images.append(full)
+
+    if not images:
+        for a in container.find_all("a", href=True):
+            h = a["href"].strip()
+            if re.search(r"\.(jpg|jpeg|png|gif|webp)(?:\?|$)", h, re.I):
+                full = absolutize(url, h)
+                if is_content_image(full): images.append(full)
+
+    images = list(dict.fromkeys(images))
+
+    if len(summary) < 60 and not images:
+        print(f"[warn] weak content (short text & no images), skip: {url}")
+        return None
+
+    if TRACE_IMAGE_DEBUG:
+        print("[trace][t50] images(after whitelist):", images[:10])
+        try: tg_send_text("🔍 t50 candidates:\n" + "\n".join(images[:10] or ["(no images)"]))
+        except Exception: pass
+
+    return {"title": title, "summary": summary, "images": images}
+
+# ===== Main =====
 def process():
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        raise RuntimeError("TELEGRAM_TOKEN / TELEGRAM_CHAT_ID is required")
+        raise RuntimeError("TELEGRAM_TOKEN / TELEGRAM_CHAT_ID required")
 
-    if ENABLE_HEARTBEAT:
-        tg_send_text(HEARTBEAT_TEXT)
+    apply_cookies()
+    if not preflight_auth():
+        return
 
-    posts = fetch_list()
-    posts.sort(key=lambda x: x["url"])
+    posts = parse_list()
+    if not posts:
+        print("[info] no posts found (t50)"); return
 
     seen = load_seen()
     to_send = []
     for p in posts:
-        key = f"avdbs:{T_CODE}:{hashlib.sha1(p['url'].encode('utf-8')).hexdigest()}"
+        key = f"avdbs:t50:{p['url']}"
         if key not in seen:
-            p["_seen_key"] = key
-            to_send.append(p)
+            d = dict(p); d["_seen_key"] = key; to_send.append(d)
+
+    if FORCE_SEND_LATEST and not to_send and posts:
+        latest = dict(posts[0]); latest["_seen_key"] = f"avdbs:t50:{latest['url']}"
+        to_send = [latest]; print("[debug] FORCE_SEND_LATEST=1 → sending most recent once (t50)")
 
     if not to_send:
-        print("[info] no new posts")
-        return
+        print("[info] no new posts to send (t50)"); return
 
     sent_keys = []
     for p in to_send:
-        title = p["title"]
-        url   = p["url"]
-
-        media = fetch_content_media_and_summary(url)
-        if media.get("title_override"):
-            title = media["title_override"]
-
-        images = media["images"]
-        videos = media["videos"]
-        iframes = media["iframes"]
-        summary = media["summary"]
-
-        media_urls = images + videos
-        MAX_ITEMS = 10
-
-        if not media_urls:
-            caption = build_caption(title, url, summary, None, None)
-            tg_send_text(caption)
-            sent_keys.append(p["_seen_key"])
-            time.sleep(1)
+        url = p["url"]
+        data = parse_post(url)
+        if data is None:
             continue
 
-        total = len(media_urls)
-        total_batches = (total + MAX_ITEMS - 1) // MAX_ITEMS
+        title, summary, images = data["title"], data["summary"], data["images"]
 
-        for batch_idx in range(total_batches):
-            start = batch_idx * MAX_ITEMS
-            end = min(start + MAX_ITEMS, total)
-            chunk = media_urls[start:end]
-
-            media_items = []
-            for i, murl in enumerate(chunk):
-                typ = "video" if any(murl.lower().endswith(ext) for ext in (".mp4", ".mov", ".webm", ".mkv", ".m4v")) else "photo"
-                item = {"type": typ, "media": murl}
-                if batch_idx == 0 and i == 0:
-                    item["caption"] = build_caption(title, url, summary, batch_idx + 1, total_batches)
-                    item["parse_mode"] = "HTML"
-                elif i == 0 and total_batches > 1:
-                    item["caption"] = f"({batch_idx + 1}/{total_batches}) 계속"
-                media_items.append(item)
-
-            r, j = tg_send_media_group(media_items)
-            if not j.get("ok"):
-                tg_send_text(build_caption(title, url, summary, batch_idx + 1, total_batches))
-            time.sleep(1)
-
-        if iframes:
-            tg_send_text("🎬 임베드 동영상 링크:\n" + "\n".join(iframes[:5]))
-
-        sent_keys.append(p["_seen_key"])
+        tg_send_text(f"📌 <b>{title}</b>\n{summary}\n{url}")
         time.sleep(1)
 
+        for img in images[:10]:
+            blob = download_bytes(img, url)
+            if blob:
+                send_photo_file(blob, None); time.sleep(1)
+            else:
+                print(f"[warn] skip image due to download failure: {img}")
+
+        sent_keys.append(p["_seen_key"])
+
     append_seen(sent_keys)
-    print(f"[info] appended {len(sent_keys)} keys")
+    print(f"[info] appended {len(sent_keys)} keys (t50)")
 
 if __name__ == "__main__":
     process()
