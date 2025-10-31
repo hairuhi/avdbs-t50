@@ -1,12 +1,12 @@
-name: AVDBS t50 Bot (v7.8)
+name: AVDBS t50 Bot (v8.0)
 
 on:
   schedule:
-    - cron: "*/12 * * * *"     # 12분마다 (t22와 살짝 엇갈리게)
+    - cron: "*/12 * * * *"     # 12분마다
   workflow_dispatch:
 
 permissions:
-  contents: write              # state 파일 푸시
+  contents: write
 
 concurrency:
   group: avdbs-t50
@@ -15,7 +15,6 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout (full)
         uses: actions/checkout@v4
@@ -31,19 +30,7 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      # (선택) 수동 실행시 봇 정상여부 체크
-      - name: Telegram self-test
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          curl -s --get \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=✅ Telegram self-test (AVDBS t50 v7.8)" \
-            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" || true
-
-      # 쿠키 프리체크: t50 페이지 접근 가능?
+      # 쿠키가 맞는지 바로 확인 (로그에 HTML 조각이 보이면 OK)
       - name: AVDBS cookie self-test (t50)
         env:
           AVDBS_COOKIE: ${{ secrets.AVDBS_COOKIE }}
@@ -51,13 +38,16 @@ jobs:
           echo "== /board/t50 with cookie =="
           curl -s -H "Cookie: ${AVDBS_COOKIE}" https://www.avdbs.com/board/t50 | head -n 60
 
-      - name: Run crawler (t50)
+      - name: Run t50 crawler
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}  # 분리 원하면 여기 다른 CHAT_ID 시크릿을 연결
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}  # 분리 원하면 별도 시크릿 사용
           AVDBS_BASE: "https://www.avdbs.com"
           AVDBS_BOARD_PATH: "/board/t50"
+          # 인증 우선순위: AVDBS_COOKIE → (실패 시) AVDBS_ID/AVDBS_PW
           AVDBS_COOKIE: ${{ secrets.AVDBS_COOKIE }}
+          AVDBS_ID: ${{ secrets.AVDBS_ID }}
+          AVDBS_PW: ${{ secrets.AVDBS_PW }}
           FORCE_SEND_LATEST: "0"
           RESET_SEEN: "0"
           TRACE_IMAGE_DEBUG: "0"
