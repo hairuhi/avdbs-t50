@@ -48,9 +48,9 @@ jobs:
           AVDBS_COOKIE: ${{ secrets.AVDBS_COOKIE }}
           AVDBS_ID: ${{ secrets.AVDBS_ID }}
           AVDBS_PW: ${{ secrets.AVDBS_PW }}
-          FORCE_SEND_LATEST: "0"
-          RESET_SEEN: "0"
-          TRACE_IMAGE_DEBUG: "0"
+          FORCE_SEND_LATEST: "1"
+          RESET_SEEN: "1"
+          TRACE_IMAGE_DEBUG: "1"
         run: |
           python -u main_t50.py
 
