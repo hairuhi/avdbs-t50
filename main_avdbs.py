@@ -20,7 +20,7 @@ pathlib.Path("state").mkdir(exist_ok=True, parents=True)
 # === 이미지/영상 필터 ===
 EXCLUDE_IMG = [
     "logo", "banner", "ads", "level", "19cert", "new_9x9w", "loading_img",
-    "favicon", "/thumb/", "/placeholder/"
+    "favicon", "/thumb/", "/placeholder/", "aashop", "message_icon_main", "main-search-34x34", ""
 ]
 VALID_VIDEO_DOMAINS = ["youtube", "youtu.be", "dood", "avdbs.com"]
 
