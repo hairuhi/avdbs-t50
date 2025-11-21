@@ -1,172 +1,161 @@
-import os, re, time, pathlib
-from io import BytesIO
-from urllib.parse import urljoin, urlparse
+import os
+import sys
+import time
 import requests
-from bs4 import BeautifulSoup
-
-# === 기본 설정 ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-AVDBS_BASE = os.getenv("AVDBS_BASE", "https://www.avdbs.com").rstrip("/")
-BOARD_PATH = os.getenv("AVDBS_BOARD_PATH", "/board/t22")  # 기본은 t22
-AVDBS_COOKIE = os.getenv("AVDBS_COOKIE", "")
-TIMEOUT = 25
-
-# === 동작 로그 및 상태 저장 ===
-board_name = BOARD_PATH.strip("/").split("/")[-1]
-STATE_FILE = f"state/{board_name}_seen.txt"
-pathlib.Path("state").mkdir(exist_ok=True, parents=True)
-
-# === 이미지/영상 필터 ===
-EXCLUDE_IMG = [
-    "logo", "banner", "ads", "level", "19cert", "new_9x9w", "loading_img",
-    "favicon", "/thumb/", "/placeholder/", "aashop", "message_icon_main", "main-search-34x34", ""
-]
-VALID_VIDEO_DOMAINS = ["youtube", "youtu.be", "dood", "avdbs.com"]
-
-# === 세션 ===
-session = requests.Session()
-session.headers.update({
-    "User-Agent": f"Mozilla/5.0 (compatible; AVDBS-Bot/{board_name})",
-    "Referer": AVDBS_BASE + "/"
-})
-for d in ["avdbs.com", ".avdbs.com", "i1.avdbs.com", ".i1.avdbs.com"]:
-    session.cookies.set("adult_chk", "1", domain=d)
-if AVDBS_COOKIE:
-    for c in AVDBS_COOKIE.split(";"):
-        if "=" in c:
-            k, v = c.split("=", 1)
-            for d in ["avdbs.com", ".avdbs.com", "i1.avdbs.com", ".i1.avdbs.com"]:
-                session.cookies.set(k.strip(), v.strip(), domain=d)
-
-# === 텔레그램 ===
-def tg_send_text(text: str):
-    return requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-        timeout=60,
-    )
-
-def tg_send_photo(b: bytes, caption: str | None = None):
-    return requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
-        data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption or ""},
-        files={"photo": ("image.jpg", BytesIO(b))},
-        timeout=60,
-    )
-
-# === 상태 관리 ===
-def load_seen() -> set[str]:
-    if not os.path.exists(STATE_FILE): return set()
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return set(x.strip() for x in f if x.strip())
-
-def save_seen(keys: list[str]):
-    if not keys: return
-    with open(STATE_FILE, "a", encoding="utf-8") as f:
-        for k in keys: f.write(k + "\n")
-
-def clean_url(u: str) -> str:
-    if not u: return ""
-    if u.startswith("//"): u = "https:" + u
-    return urljoin(AVDBS_BASE, u)
-
-def download_image(u: str) -> bytes | None:
-    try:
-        r = session.get(u, timeout=TIMEOUT, headers={"Referer": AVDBS_BASE + "/"})
-        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
-            return r.content
-    except Exception:
-        pass
-    return None
-
-# === 게시판 목록 ===
-def get_posts() -> list[dict]:
-    url = f"{AVDBS_BASE}{BOARD_PATH}"
-    r = session.get(url, timeout=TIMEOUT)
-    r.encoding = r.apparent_encoding or "utf-8"
-    soup = BeautifulSoup(r.text, "html.parser")
-    posts: list[dict] = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if re.search(r"/board/\d+(?:\?.*)?$", href):
-            title = a.get_text(strip=True)
-            full = clean_url(href)
-            if title and full not in [p["url"] for p in posts]:
-                posts.append({"title": title, "url": full})
-    posts.sort(key=lambda x: x["url"], reverse=True)
-    return posts
-
-# === 게시글 파싱 ===
-def parse_post(url: str) -> dict | None:
-    r = session.get(url, timeout=TIMEOUT)
-    r.encoding = r.apparent_encoding or "utf-8"
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    if "성인 인증" in soup.text[:1500] or "로그인" in soup.text[:1500]:
-        print(f"[warn] adult gate → skip {url}")
-        return None
-
-    content = soup.select_one("#bo_v_con") or soup.select_one(".view_content") or soup
-    imgs, vids = [], []
-
-    for img in content.find_all("img"):
-        src = (img.get("src") or "").strip()
-        if not src or any(x in src for x in EXCLUDE_IMG):
-            continue
-        imgs.append(clean_url(src))
-
-    for iframe in content.find_all("iframe"):
-        src = (iframe.get("src") or "").strip()
-        if src:
-            host = (urlparse(src).hostname or "").lower()
-            if any(dom in host for dom in VALID_VIDEO_DOMAINS):
-                vids.append(clean_url(src))
-
-    imgs = list(dict.fromkeys(imgs))
-    vids = list(dict.fromkeys(vids))
-    title = soup.title.text.strip() if soup.title else "(제목 없음)"
-    return {"title": title, "url": url, "images": imgs, "videos": vids}
-
-# === 실행 ===
-def main():
-    seen = load_seen()
-    posts = get_posts()
-    sent = []
-
-    for p in posts:
-        if p["url"] in seen:
-            continue
-
-        data = parse_post(p["url"])
-        if not data:
-            continue
-
-        title, url, images, videos = data["title"], data["url"], data["images"], data["videos"]
-
-        if not images and not videos:
-            print(f"[skip] no media {url}")
-            continue
-
-        # 이미지 전송
-        for u in images[:10]:
-            imgdata = download_image(u)
-            if imgdata:
-                tg_send_photo(imgdata)
-                time.sleep(1)
-
-        # 영상 링크 전송
-        if videos:
-            tg_send_text("🎬 영상 링크:\n" + "\n".join(videos))
-
-        # 제목 + 원문 링크
-        tg_send_text(f"<b>{title}</b>\n{url}")
-
-        sent.append(p["url"])
-        time.sleep(2)
-
-    save_seen(sent)
-    print(f"[done] {board_name}: {len(sent)} new posts sent.")
-
+from playwright.sync_api import sync_playwright
+def send_telegram_message(token, chat_id, text, media_urls=None):
+    """
+    Sends a message to Telegram. If media_urls is provided, sends them as a media group (album)
+    or single photo/video.
+    """
+    base_url = f"https://api.telegram.org/bot{token}"
+    
+    # 1. Send Text Message first (or as caption if single media)
+    if not media_urls:
+        url = f"{base_url}/sendMessage"
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        try:
+            r = requests.post(url, data=data)
+            r.raise_for_status()
+            print("Telegram text sent.")
+        except Exception as e:
+            print(f"Failed to send Telegram text: {e}")
+        return
+    # 2. Send Media
+    # Telegram limits: 10 items per media group.
+    # We'll just send the first 10 items.
+    media_group = []
+    for i, m_url in enumerate(media_urls[:10]):
+        # Simple heuristic: check extension or assume photo if not obviously video
+        media_type = "photo"
+        if m_url.lower().endswith(('.mp4', '.mov', '.avi')):
+            media_type = "video"
+        
+        media_item = {
+            "type": media_type,
+            "media": m_url
+        }
+        # Add caption to the first item
+        if i == 0:
+            media_item["caption"] = text
+            media_item["parse_mode"] = "HTML"
+            
+        media_group.append(media_item)
+    if media_group:
+        url = f"{base_url}/sendMediaGroup"
+        data = {"chat_id": chat_id, "media": str(media_group).replace("'", '"')} # JSON-like string for media
+        # Note: requests can handle json parameter, but sendMediaGroup expects a JSON string in the 'media' field form-data or query param.
+        # Let's use the json parameter of requests for simplicity if the endpoint supports it, 
+        # but standard Bot API often prefers POST fields.
+        # Better approach for 'media' parameter is sending it as a JSON string in data.
+        import json
+        data = {"chat_id": chat_id, "media": json.dumps(media_group)}
+        
+        try:
+            r = requests.post(url, data=data)
+            if r.status_code != 200:
+                print(f"Failed to send media group: {r.text}. Falling back to text only.")
+                # Fallback
+                send_telegram_message(token, chat_id, text)
+            else:
+                print("Telegram media sent.")
+        except Exception as e:
+            print(f"Error sending media: {e}")
+            send_telegram_message(token, chat_id, text)
+def run():
+    user_id = os.environ.get("AVDBS_ID")
+    user_pw = os.environ.get("AVDBS_PW")
+    tg_token = os.environ.get("TELEGRAM_TOKEN")
+    tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not user_id or not user_pw:
+        print("Error: AVDBS_ID and AVDBS_PW environment variables must be set.")
+        sys.exit(1)
+        
+    if not tg_token or not tg_chat_id:
+        print("Warning: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set. Notifications will be skipped.")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        try:
+            # 1. Login
+            print("Navigating to login page...")
+            page.goto("https://www.avdbs.com/menu/member/login.php")
+            page.wait_for_selector("#member_uid", state="visible")
+            
+            print("Filling credentials...")
+            page.fill("#member_uid", user_id)
+            page.fill("#member_pwd", user_pw)
+            
+            print("Submitting login form...")
+            with page.expect_navigation(timeout=15000):
+                page.click(".btn_login")
+            
+            # 2. Navigate to target board
+            target_url = "https://www.avdbs.com/board/t50"
+            print(f"Navigating to {target_url}...")
+            page.goto(target_url)
+            
+            # 3. Extract Post Links
+            # We'll grab the first 5 posts to avoid spamming and timeouts
+            posts = []
+            rows = page.query_selector_all(".list_subject") # Adjust selector based on actual site structure if needed
+            # Fallback if class not found, try generic links
+            if not rows:
+                links = page.query_selector_all("a")
+                for link in links:
+                    href = link.get_attribute("href")
+                    text = link.inner_text().strip()
+                    if href and "wr_id" in href and text:
+                        full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
+                        posts.append({"title": text, "url": full_url})
+                        if len(posts) >= 5: break
+            
+            print(f"Found {len(posts)} posts. Processing...")
+            for post in posts:
+                print(f"Processing: {post['title']}")
+                try:
+                    # Visit post detail
+                    page.goto(post['url'])
+                    page.wait_for_load_state("domcontentloaded")
+                    
+                    # Extract Media
+                    media_urls = []
+                    
+                    # Images
+                    imgs = page.query_selector_all(".view_content img") # Common class for content
+                    if not imgs:
+                        imgs = page.query_selector_all("#bo_v_con img") # Another common ID
+                    
+                    for img in imgs:
+                        src = img.get_attribute("src")
+                        if src:
+                            full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
+                            media_urls.append(full_src)
+                            
+                    # Videos (HTML5 video tags)
+                    videos = page.query_selector_all("video source")
+                    for v in videos:
+                        src = v.get_attribute("src")
+                        if src:
+                            full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
+                            media_urls.append(full_src)
+                    # Send to Telegram
+                    if tg_token and tg_chat_id:
+                        msg_text = f"<b>{post['title']}</b>\n<a href='{post['url']}'>{post['url']}</a>"
+                        send_telegram_message(tg_token, tg_chat_id, msg_text, media_urls)
+                        
+                    # Polite delay
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    print(f"Error processing post {post['title']}: {e}")
+                    continue
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            page.screenshot(path="error_screenshot.png")
+            raise
+        finally:
+            browser.close()
 if __name__ == "__main__":
-    main()
+    run()
