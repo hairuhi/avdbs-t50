@@ -1,0 +1,54 @@
+# GitHub Actions Crawler for AVDBS
+
+## Goal
+Create a stable, scheduled crawler for `https://www.avdbs.com/board/t50` that runs on GitHub Actions. The crawler must handle the site's login requirement and JavaScript-based browser verification.
+
+## User Review Required
+> [!IMPORTANT]
+> **Credentials Security**: You must NOT commit your password to the code. You will need to add `AVDBS_ID` and `AVDBS_PW` as **Secrets** in your GitHub repository settings.
+
+> [!NOTE]
+> **Technology Choice**: We will use **Playwright** (Python) instead of simple `requests` because the site uses a JavaScript-based cookie check (redirect loop) that blocks simple HTTP clients.
+
+## Proposed Changes
+
+### Root Directory
+#### [NEW] [crawler.py](file:///C:/Users/gereg/.gemini/antigravity/brain/d1ae1af9-45db-43e6-9b50-fc57cb566fd3/crawler.py)
+- Python script using `playwright.sync_api`.
+- **Functions**:
+    - `login(page, user_id, user_pw)`: Handles the login flow.
+    - `crawl_board(page)`: Navigates to `/board/t50` and extracts post titles/links.
+    - `main()`: Orchestrates the process and saves results (e.g., to a JSON or CSV file, or just prints them).
+
+#### [NEW] [requirements.txt](file:///C:/Users/gereg/.gemini/antigravity/brain/d1ae1af9-45db-43e6-9b50-fc57cb566fd3/requirements.txt)
+- `playwright`
+- `pytest-playwright` (optional, for testing)
+
+### GitHub Workflows
+#### [NEW] [.github/workflows/crawl.yml](file:///C:/Users/gereg/.gemini/antigravity/brain/d1ae1af9-45db-43e6-9b50-fc57cb566fd3/.github/workflows/crawl.yml)
+- **Triggers**:
+    - `schedule`: Cron job for 21:00 KST (12:00 UTC).
+    - `workflow_dispatch`: Manual trigger for testing.
+- **Steps**:
+    - Checkout code.
+    - Set up Python.
+    - Install dependencies (`pip install -r requirements.txt`).
+    - Install Playwright browsers (`playwright install chromium`).
+    - Run crawler (`python crawler.py`).
+    - (Optional) Commit results back to repo or upload as artifact.
+
+## Verification Plan
+
+### Automated Tests
+- None (Site requires live credentials).
+
+### Manual Verification
+1.  **Local Test**:
+    - User runs `pip install -r requirements.txt` and `playwright install`.
+    - User runs `python crawler.py` (setting env vars `AVDBS_ID` and `AVDBS_PW` in terminal).
+    - Verify the script prints the crawled data.
+2.  **GitHub Actions Test**:
+    - User pushes code to GitHub.
+    - User adds Secrets (`AVDBS_ID`, `AVDBS_PW`).
+    - User manually triggers the workflow.
+    - Verify the workflow succeeds and logs show crawled data.

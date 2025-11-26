@@ -1,0 +1,17 @@
+# Task: Build GitHub Actions Crawler for AVDBS
+
+- [x] Analyze target website (avdbs.com) login mechanism <!-- id: 0 -->
+- [x] Create Python crawler script <!-- id: 1 -->
+    - [x] Implement login logic <!-- id: 2 -->
+    - [x] Implement crawling logic for board/t50 <!-- id: 3 -->
+    - [x] Handle anti-bot measures (if any) <!-- id: 4 -->
+- [x] Create GitHub Actions Workflow <!-- id: 5 -->
+    - [x] Define workflow file (.github/workflows/crawl.yml) <!-- id: 6 -->
+    - [x] Configure Python environment and dependencies <!-- id: 7 -->
+    - [x] Set up scheduling (cron) <!-- id: 8 -->
+- [x] Add Telegram Notification <!-- id: 11 -->
+    - [x] Update crawler.py to scrape post details (images/videos) <!-- id: 12 -->
+    - [x] Implement Telegram message sending logic <!-- id: 13 -->
+    - [x] Update GitHub Secrets instructions <!-- id: 14 -->
+- [ ] Verify locally (User to test) <!-- id: 9 -->
+- [ ] Documentation for GitHub Secrets setup <!-- id: 10 -->

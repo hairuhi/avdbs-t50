@@ -1,0 +1,6 @@
+{
+  "artifactType": "ARTIFACT_TYPE_IMPLEMENTATION_PLAN",
+  "summary": "Updated plan to include Telegram notification logic. The crawler will now visit post detail pages to extract media and send messages using the Telegram Bot API.",
+  "updatedAt": "2025-11-21T14:37:10.422563Z",
+  "version": "1"
+}
