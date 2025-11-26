@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.resolved
+*.resolved.*
+*.metadata.json
+*.webp
+*.png
+*.jpg
+*.jpeg
+error_screenshot.png
+debug_*.png
