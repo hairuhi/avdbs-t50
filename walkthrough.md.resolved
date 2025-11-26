@@ -29,13 +29,13 @@ For the crawler to log in, you must save your ID and Password as **Secrets** in 
 3.  Click **New repository secret**.
 4.  Add the following two secrets:
     *   **Name**: `AVDBS_ID`
-        *   **Value**: `hairuhi`
+        *   **Value**: `<YOUR_ID>`
     *   **Name**: `AVDBS_PW`
-        *   **Value**: `qkfka999`
+        *   **Value**: `<YOUR_PASSWORD>`
     *   **Name**: `TELEGRAM_TOKEN`
-        *   **Value**: `8242833472:AAGzp5g7LzosrJffmSegcKvcqCt5gdz70Qk`
+        *   **Value**: `<YOUR_TELEGRAM_TOKEN>`
     *   **Name**: `TELEGRAM_CHAT_ID`
-        *   **Value**: `6137638808`
+        *   **Value**: `<YOUR_CHAT_ID>`
 
 ## 3. Verify Execution
 1.  Go to the **Actions** tab in your repository.
