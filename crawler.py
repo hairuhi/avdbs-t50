@@ -17,7 +17,6 @@ def send_telegram_message(token, chat_id, text, media_urls=None):
         data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         try:
             r = requests.post(url, data=data)
-            # r.raise_for_status() # Don't raise, just print
             if r.status_code != 200:
                 print(f"Telegram Error: {r.text}")
             else:
@@ -60,6 +59,80 @@ def send_telegram_message(token, chat_id, text, media_urls=None):
             print(f"Error sending media: {e}")
             send_telegram_message(token, chat_id, text)
 
+def crawl_board(page, board_url, tg_token, tg_chat_id):
+    print(f"Navigating to {board_url}...")
+    page.goto(board_url)
+    page.wait_for_load_state("networkidle")
+    
+    # Extract Post Links using improved selector
+    posts = []
+    # Selector found: a.lnk.vstt (contains h2 with title)
+    links = page.query_selector_all("a.lnk.vstt")
+    
+    if not links:
+        print(f"Selector a.lnk.vstt not found on {board_url}. Trying generic fallback...")
+        all_links = page.query_selector_all("a")
+        for link in all_links:
+            href = link.get_attribute("href")
+            text = link.inner_text().strip()
+            if href and "wr_id" in href and text and "board" in href:
+                full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
+                posts.append({"title": text, "url": full_url})
+                if len(posts) >= 5: break
+    else:
+        for link in links:
+            href = link.get_attribute("href")
+            # Title is usually inside h2, but sometimes direct text. Try both.
+            title_el = link.query_selector("h2")
+            text = title_el.inner_text().strip() if title_el else link.inner_text().strip()
+            
+            if href and text:
+                full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
+                posts.append({"title": text, "url": full_url})
+            if len(posts) >= 5: break
+
+    print(f"Found {len(posts)} posts on {board_url}.")
+    
+    if len(posts) == 0:
+        print(f"No posts found on {board_url}!")
+        if tg_token and tg_chat_id:
+            send_telegram_message(tg_token, tg_chat_id, f"⚠️ No posts found on {board_url}. Check logs.")
+    
+    for post in posts:
+        print(f"Processing: {post['title']}")
+        try:
+            page.goto(post['url'])
+            page.wait_for_load_state("domcontentloaded")
+            
+            media_urls = []
+            # Images
+            imgs = page.query_selector_all(".view_content img") 
+            if not imgs: imgs = page.query_selector_all("#bo_v_con img")
+            
+            for img in imgs:
+                src = img.get_attribute("src")
+                if src:
+                    full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
+                    media_urls.append(full_src)
+                    
+            # Videos
+            videos = page.query_selector_all("video source")
+            for v in videos:
+                src = v.get_attribute("src")
+                if src:
+                    full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
+                    media_urls.append(full_src)
+
+            if tg_token and tg_chat_id:
+                msg_text = f"<b>{post['title']}</b>\n<a href='{post['url']}'>{post['url']}</a>"
+                send_telegram_message(tg_token, tg_chat_id, msg_text, media_urls)
+                
+            time.sleep(2)
+            
+        except Exception as e:
+            print(f"Error processing post {post['title']}: {e}")
+            continue
+
 def run():
     user_id = os.environ.get("AVDBS_ID")
     user_pw = os.environ.get("AVDBS_PW")
@@ -90,7 +163,6 @@ def run():
                 page.wait_for_selector("#member_uid", state="visible", timeout=10000)
             except:
                 print("Login input not found. Already logged in or page changed?")
-                page.screenshot(path="debug_login_page.png")
             
             print("Filling credentials...")
             page.fill("#member_uid", user_id)
@@ -100,85 +172,17 @@ def run():
             with page.expect_navigation(timeout=30000):
                 page.click(".btn_login")
             
-            # 2. Navigate to target board
-            target_url = "https://www.avdbs.com/board/t50"
-            print(f"Navigating to {target_url}...")
-            page.goto(target_url)
-            page.wait_for_load_state("networkidle")
+            # 2. Crawl Boards
+            boards = [
+                "https://www.avdbs.com/board/t50",
+                "https://www.avdbs.com/board/t22"
+            ]
             
-            # 3. Extract Post Links
-            posts = []
-            # Try multiple selectors
-            rows = page.query_selector_all(".list_subject") 
-            if not rows:
-                print("Selector .list_subject not found. Trying generic links...")
-                links = page.query_selector_all("a")
-                for link in links:
-                    href = link.get_attribute("href")
-                    text = link.inner_text().strip()
-                    if href and "wr_id" in href and text and "board/t50" in href:
-                        full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
-                        posts.append({"title": text, "url": full_url})
-                        if len(posts) >= 5: break
-            else:
-                # If .list_subject exists, usually the link is inside or it IS the link
-                for row in rows:
-                    # Check if row is 'a' tag or contains 'a' tag
-                    link = row if row.evaluate("el => el.tagName") == "A" else row.query_selector("a")
-                    if link:
-                        href = link.get_attribute("href")
-                        text = link.inner_text().strip()
-                        if href:
-                            full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
-                            posts.append({"title": text, "url": full_url})
-                    if len(posts) >= 5: break
-
-            print(f"Found {len(posts)} posts.")
-            
-            if len(posts) == 0:
-                print("No posts found!")
-                page.screenshot(path="debug_no_posts.png")
-                if tg_token and tg_chat_id:
-                    send_telegram_message(tg_token, tg_chat_id, "⚠️ No posts found. Check GitHub Actions logs.")
-            
-            for post in posts:
-                print(f"Processing: {post['title']}")
-                try:
-                    page.goto(post['url'])
-                    page.wait_for_load_state("domcontentloaded")
-                    
-                    media_urls = []
-                    # Images
-                    imgs = page.query_selector_all(".view_content img") 
-                    if not imgs: imgs = page.query_selector_all("#bo_v_con img")
-                    
-                    for img in imgs:
-                        src = img.get_attribute("src")
-                        if src:
-                            full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
-                            media_urls.append(full_src)
-                            
-                    # Videos
-                    videos = page.query_selector_all("video source")
-                    for v in videos:
-                        src = v.get_attribute("src")
-                        if src:
-                            full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
-                            media_urls.append(full_src)
-
-                    if tg_token and tg_chat_id:
-                        msg_text = f"<b>{post['title']}</b>\n<a href='{post['url']}'>{post['url']}</a>"
-                        send_telegram_message(tg_token, tg_chat_id, msg_text, media_urls)
-                        
-                    time.sleep(2)
-                    
-                except Exception as e:
-                    print(f"Error processing post {post['title']}: {e}")
-                    continue
+            for board in boards:
+                crawl_board(page, board, tg_token, tg_chat_id)
 
         except Exception as e:
             print(f"An error occurred: {e}")
-            page.screenshot(path="error_screenshot.png")
             if tg_token and tg_chat_id:
                 send_telegram_message(tg_token, tg_chat_id, f"❌ Crawler Error: {e}")
             raise
