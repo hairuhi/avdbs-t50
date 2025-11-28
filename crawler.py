@@ -64,25 +64,35 @@ def crawl_board(page, board_url, tg_token, tg_chat_id):
     page.goto(board_url)
     page.wait_for_load_state("networkidle")
     
-    # Extract Post Links using improved selector
+    # Extract Post Links
+    # We want to skip "Notice" posts.
+    # Analysis shows normal posts have a thumbnail link (a.lnk with img) immediately before the title link (a.lnk.vstt).
+    # Notices do NOT have the thumbnail link.
+    # So we use the selector: a.lnk:has(img) + a.lnk.vstt
+    
     posts = []
-    # Selector found: a.lnk.vstt (contains h2 with title)
-    links = page.query_selector_all("a.lnk.vstt")
+    links = page.query_selector_all("a.lnk:has(img) + a.lnk.vstt")
     
     if not links:
-        print(f"Selector a.lnk.vstt not found on {board_url}. Trying generic fallback...")
-        all_links = page.query_selector_all("a")
-        for link in all_links:
-            href = link.get_attribute("href")
-            text = link.inner_text().strip()
-            if href and "wr_id" in href and text and "board" in href:
-                full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
-                posts.append({"title": text, "url": full_url})
-                if len(posts) >= 5: break
+        print(f"Strict selector 'a.lnk:has(img) + a.lnk.vstt' found nothing on {board_url}. Trying fallback...")
+        # Fallback: Get all a.lnk.vstt and check if they have a preceding sibling with img
+        all_vstt = page.query_selector_all("a.lnk.vstt")
+        for link in all_vstt:
+            # Check previous sibling
+            prev = link.evaluate_handle("el => el.previousElementSibling")
+            if prev and prev.as_element():
+                has_img = prev.evaluate("el => el.querySelector('img') !== null")
+                if has_img:
+                    href = link.get_attribute("href")
+                    title_el = link.query_selector("h2")
+                    text = title_el.inner_text().strip() if title_el else link.inner_text().strip()
+                    if href and text:
+                        full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
+                        posts.append({"title": text, "url": full_url})
+            if len(posts) >= 5: break
     else:
         for link in links:
             href = link.get_attribute("href")
-            # Title is usually inside h2, but sometimes direct text. Try both.
             title_el = link.query_selector("h2")
             text = title_el.inner_text().strip() if title_el else link.inner_text().strip()
             
@@ -91,12 +101,12 @@ def crawl_board(page, board_url, tg_token, tg_chat_id):
                 posts.append({"title": text, "url": full_url})
             if len(posts) >= 5: break
 
-    print(f"Found {len(posts)} posts on {board_url}.")
+    print(f"Found {len(posts)} NORMAL posts on {board_url}.")
     
     if len(posts) == 0:
-        print(f"No posts found on {board_url}!")
+        print(f"No normal posts found on {board_url}!")
         if tg_token and tg_chat_id:
-            send_telegram_message(tg_token, tg_chat_id, f"⚠️ No posts found on {board_url}. Check logs.")
+            send_telegram_message(tg_token, tg_chat_id, f"⚠️ No normal posts found on {board_url}. Check structure.")
     
     for post in posts:
         print(f"Processing: {post['title']}")
