@@ -65,33 +65,20 @@ def crawl_board(page, board_url, tg_token, tg_chat_id):
     page.wait_for_load_state("networkidle")
     
     # Extract Post Links
-    # We want to skip "Notice" posts.
-    # Analysis shows normal posts have a thumbnail link (a.lnk with img) immediately before the title link (a.lnk.vstt).
-    # Notices do NOT have the thumbnail link.
-    # So we use the selector: a.lnk:has(img) + a.lnk.vstt
+    # Logic:
+    # 1. Get all post links (a.lnk.vstt).
+    # 2. Filter OUT those that contain <img class="notice"> inside their <h2>.
+    # 3. Take the first 5 strictly normal posts.
     
     posts = []
-    links = page.query_selector_all("a.lnk:has(img) + a.lnk.vstt")
+    all_links = page.query_selector_all("a.lnk.vstt")
     
-    if not links:
-        print(f"Strict selector 'a.lnk:has(img) + a.lnk.vstt' found nothing on {board_url}. Trying fallback...")
-        # Fallback: Get all a.lnk.vstt and check if they have a preceding sibling with img
-        all_vstt = page.query_selector_all("a.lnk.vstt")
-        for link in all_vstt:
-            # Check previous sibling
-            prev = link.evaluate_handle("el => el.previousElementSibling")
-            if prev and prev.as_element():
-                has_img = prev.evaluate("el => el.querySelector('img') !== null")
-                if has_img:
-                    href = link.get_attribute("href")
-                    title_el = link.query_selector("h2")
-                    text = title_el.inner_text().strip() if title_el else link.inner_text().strip()
-                    if href and text:
-                        full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
-                        posts.append({"title": text, "url": full_url})
-            if len(posts) >= 5: break
-    else:
-        for link in links:
+    for link in all_links:
+        # Check if it's a notice
+        # A notice usually has <h2 ...><img class="notice" ...> ... </h2>
+        is_notice = link.evaluate("el => el.querySelector('h2 img.notice') !== null")
+        
+        if not is_notice:
             href = link.get_attribute("href")
             title_el = link.query_selector("h2")
             text = title_el.inner_text().strip() if title_el else link.inner_text().strip()
@@ -99,7 +86,9 @@ def crawl_board(page, board_url, tg_token, tg_chat_id):
             if href and text:
                 full_url = href if href.startswith("http") else f"https://www.avdbs.com{href}"
                 posts.append({"title": text, "url": full_url})
-            if len(posts) >= 5: break
+        
+        if len(posts) >= 5:
+            break
 
     print(f"Found {len(posts)} NORMAL posts on {board_url}.")
     
