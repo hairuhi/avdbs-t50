@@ -147,6 +147,14 @@ def crawl_board(page, board_url, tg_token, tg_chat_id, history, cookies=None):
     page.goto(board_url)
     page.wait_for_load_state("networkidle")
     
+    # Check for blocking
+    page_title = page.title()
+    if "Access Denied" in page_title or "Cloudflare" in page_title:
+        print(f"⚠️ Blocked by protections on {board_url}")
+        if tg_token and tg_chat_id:
+             send_telegram_message(tg_token, tg_chat_id, f"⚠️ Crowler Blocked on {board_url}. Check GitHub Action logs.")
+        return
+    
     posts = []
     all_links = page.query_selector_all("a.lnk.vstt")
     
