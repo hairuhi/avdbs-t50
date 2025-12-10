@@ -5,6 +5,7 @@ import json
 import shutil
 import requests
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
 HISTORY_FILE = "sent_posts.json"
 
@@ -75,13 +76,74 @@ def download_media(media_urls, cookies=None, session_headers=None):
 
     return downloaded_files
 
-# ... (send_telegram_message remains unchanged) ...
+def send_telegram_message(token, chat_id, text, media_files=None):
+    """
+    Sends a message to Telegram. 
+    media_files: list of (type, filepath) tuples.
+    """
+    base_url = f"https://api.telegram.org/bot{token}"
+    
+    # 1. Text Only
+    if not media_files:
+        url = f"{base_url}/sendMessage"
+        data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        try:
+            r = requests.post(url, data=data)
+            if r.status_code != 200:
+                print(f"Telegram Error: {r.text}")
+            else:
+                print("Telegram text sent.")
+        except Exception as e:
+            print(f"Failed to send Telegram text: {e}")
+        return
+
+    # 2. Media Group (with local files)
+    # Using multipart/form-data to upload files
+    url = f"{base_url}/sendMediaGroup"
+    
+    media_group = []
+    files_to_send = {}
+    
+    for i, (m_type, m_path) in enumerate(media_files):
+        file_key = f"media{i}"
+        filename = os.path.basename(m_path)
+        
+        # 'attach://<file_key>' tells Telegram to look in the multipart form data
+        media_item = {
+            "type": m_type,
+            "media": f"attach://{file_key}"
+        }
+        if i == 0:
+            media_item["caption"] = text
+            media_item["parse_mode"] = "HTML"
+            
+        media_group.append(media_item)
+        
+        # Open file for reading in binary mode
+        f = open(m_path, "rb")
+        files_to_send[file_key] = (filename, f)
+
+    data = {"chat_id": chat_id, "media": json.dumps(media_group)}
+    
+    try:
+        r = requests.post(url, data=data, files=files_to_send)
+        if r.status_code != 200:
+            print(f"Failed to send media group: {r.text}. Falling back to text.")
+            send_telegram_message(token, chat_id, text) # Fallback to text
+        else:
+            print("Telegram media sent.")
+    except Exception as e:
+        print(f"Error sending media: {e}")
+        send_telegram_message(token, chat_id, text)
+    finally:
+        # Close all file handles
+        for _, f in files_to_send.values():
+            f.close()
+        # Clean up temp dir
+        shutil.rmtree("temp_media", ignore_errors=True)
 
 def crawl_board(page, board_url, tg_token, tg_chat_id, history, cookies=None):
     print(f"Navigating to {board_url}...")
-    # ... (navigation and extraction logic remains unchanged) ...
-    # Instead of re-pasting the matching logic, I'll focus on where download_media is called
-    
     page.goto(board_url)
     page.wait_for_load_state("networkidle")
     
@@ -142,7 +204,6 @@ def crawl_board(page, board_url, tg_token, tg_chat_id, history, cookies=None):
             continue
 
 def run():
-    # ... (setup env vars) ...
     user_id = os.environ.get("AVDBS_ID")
     user_pw = os.environ.get("AVDBS_PW")
     tg_token = os.environ.get("TELEGRAM_TOKEN")
@@ -155,19 +216,18 @@ def run():
     history = load_history()
 
     with sync_playwright() as p:
-        # ... (browser launch) ...
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
         )
         page = context.new_page()
+        stealth_sync(page)
 
         try:
             # 1. Login
             print("Navigating to login page...")
             page.goto("https://www.avdbs.com/menu/member/login.php")
             
-            # ... (login logic) ...
             try:
                 page.wait_for_selector("#member_uid", state="visible", timeout=10000)
             except:
@@ -192,7 +252,6 @@ def run():
             
             for board in boards:
                 crawl_board(page, board, tg_token, tg_chat_id, history, cookies)
-
 
 
         except Exception as e:
