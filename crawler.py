@@ -119,15 +119,33 @@ class AVDBSClient:
         """Extracts image and video URLs from a post."""
         media_urls = []
         try:
+            logger.info(f"Navigating to post: {post_url}")
             self.page.goto(post_url, timeout=60000)
             self.page.wait_for_load_state("domcontentloaded")
             
-            # Selectors from old code: .view_content img, #bo_v_con img
+            # Scroll to bottom to trigger lazy loading
+            for i in range(5):
+                self.page.mouse.wheel(0, 500)
+                self.page.wait_for_timeout(500)
+            
+            # Wait for any image to be present
+            try:
+                self.page.wait_for_selector(".view_content img, #bo_v_con img", timeout=5000)
+            except:
+                logger.warning("No images selector found immediately.")
+
+            # Selectors
             imgs = self.page.query_selector_all(".view_content img, #bo_v_con img")
+            logger.info(f"Found {len(imgs)} candidate image elements.")
+            
             for img in imgs:
-                src = img.get_attribute("src")
+                # Check for lazy loading attributes first
+                src = img.get_attribute("data-original") or img.get_attribute("data-src") or img.get_attribute("src")
                 if src:
                     full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
+                    # Filter out common placeholders/icons
+                    if any(x in full_src for x in ["blank.gif", "loading", "icon"]):
+                        continue
                     media_urls.append(full_src)
             
             # Videos
@@ -137,6 +155,8 @@ class AVDBSClient:
                 if src:
                     full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
                     media_urls.append(full_src)
+            
+            logger.info(f"Extracted {len(media_urls)} valid media URLs.")
                     
         except Exception as e:
             logger.error(f"Error extracting media from {post_url}: {e}")
