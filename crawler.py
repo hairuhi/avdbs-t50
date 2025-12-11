@@ -3,7 +3,15 @@ import time
 import requests
 import logging
 from playwright.sync_api import sync_playwright, Page, BrowserContext
-from playwright_stealth import stealth_sync
+
+try:
+    from playwright_stealth import stealth_sync
+except ImportError:
+    import playwright_stealth
+    logging.error(f"Failed to import stealth_sync. Available attributes: {dir(playwright_stealth)}")
+    # Define a dummy stealth_sync to prevent crash during import, but functionality will be missing
+    def stealth_sync(page):
+        logging.warning("Stealth mode disabled due to import error.")
 from typing import List, Dict, Tuple, Optional
 import utils
 
