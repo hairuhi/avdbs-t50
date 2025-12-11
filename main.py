@@ -27,9 +27,10 @@ def main():
     history = utils.load_history()
     
     # 2. Boards to monitor
+    # 2. Boards to monitor
     boards = [
-        "https://www.avdbs.com/board/t50",
-        "https://www.avdbs.com/board/t22"
+        {"name": "국산야동", "url": "https://www.avdbs.com/board/t50"},
+        {"name": "서양야동", "url": "https://www.avdbs.com/board/t22"}
     ]
     
     client = AVDBSClient(headless=True)
@@ -44,8 +45,8 @@ def main():
         utils.prepare_temp_dir()
 
         # 4. Process Boards
-        for board_url in boards:
-            new_posts = client.get_new_posts(board_url, history)
+        for board in boards:
+            new_posts = client.get_new_posts(board['url'], history)
             
             for post in new_posts:
                 logger.info(f"Processing post: {post['title']}")
@@ -54,10 +55,11 @@ def main():
                 media_urls = client.extract_media(post['url'])
                 
                 # Download Media
-                local_media = client.download_media(media_urls)
+                local_media = client.download_media(media_urls, referer_url=post['url'])
                 
                 # Send Notification
-                msg_text = f"<b>{post['title']}</b>\n<a href='{post['url']}'>{post['url']}</a>"
+                # Adding Label to the message
+                msg_text = f"[{board['name']}] <b>{post['title']}</b>\n<a href='{post['url']}'>{post['url']}</a>"
                 notifier.send_message(msg_text, local_media)
                 
                 # Update history immediately to avoid duplicate sends on crash

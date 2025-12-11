@@ -180,7 +180,7 @@ class AVDBSClient:
             
         return list(set(media_urls)) # Dedup
 
-    def download_media(self, media_urls: List[str]) -> List[Tuple[str, str]]:
+    def download_media(self, media_urls: List[str], referer_url: str = "https://www.avdbs.com/") -> List[Tuple[str, str]]:
         """Downloads media files to temp directory using requests (faster than playwright for downloading)."""
         downloaded = []
         if not media_urls:
@@ -192,11 +192,14 @@ class AVDBSClient:
             for c in self.session_cookies:
                 req_cookies[c['name']] = c['value']
 
+        # Get User-Agent from playwright context if possible, or use fixed one
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+        
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-            "Referer": "https://www.avdbs.com/"
+            "User-Agent": ua,
+            "Referer": referer_url
         }
-
+        
         # Limit to 10 for telegram
         for i, url in enumerate(media_urls[:10]):
             try:
