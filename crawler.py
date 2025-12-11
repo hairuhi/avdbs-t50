@@ -156,6 +156,23 @@ class AVDBSClient:
                     full_src = src if src.startswith("http") else f"https://www.avdbs.com{src}"
                     media_urls.append(full_src)
             
+            if not media_urls:
+                logger.warning(f"No media found in {post_url}. Dumping content layout for debugging.")
+                try:
+                    content_html = self.page.inner_html("body")
+                    # Log first 2000 chars of body or specific container to understand structure
+                    logger.info(f"Page Content Sample: {content_html[:2000]}")
+                    
+                    # Try to find iframes commonly used for videos
+                    iframes = self.page.query_selector_all("iframe")
+                    for frame in iframes:
+                        src = frame.get_attribute("src")
+                        logger.info(f"Found iframe src: {src}")
+                        if src and "youtube" in src:
+                            media_urls.append(src) # Add youtube link directly?
+                except Exception as e:
+                    logger.error(f"Failed to dump debug HTML: {e}")
+
             logger.info(f"Extracted {len(media_urls)} valid media URLs.")
                     
         except Exception as e:
