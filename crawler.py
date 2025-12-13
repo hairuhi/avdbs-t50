@@ -51,8 +51,17 @@ class AVDBSClient:
                 # Allowing some time for redirect
                 self.page.wait_for_load_state("networkidle")
                 
+                # Check for a known post-login element, e.g., 'Log out' button or user profile
+                # Based on avdbs, there is usually a logout button class or link
+                # Assuming .btn_logout or similar exists, or checking NOT on login page
+                
                 if "login.php" in self.page.url:
                     logger.error("Login failed (still on login page). Check credentials.")
+                    return False
+                
+                # More robust check: check for lack of ID input
+                if self.page.is_visible("#member_uid"):
+                    logger.error("Login supposedly finished but login fields still visible.")
                     return False
                 
                 logger.info("Login successful.")
@@ -78,6 +87,11 @@ class AVDBSClient:
             # Anti-bot check
             if "Access Denied" in self.page.title() or "Cloudflare" in self.page.title():
                 logger.error(f"Blocked on {board_url}")
+                return []
+            
+            # Session check
+            if "로그인" in self.page.title(): # Korean "Login"
+                logger.error(f"Redirected to login page on {board_url}. Session lost?")
                 return []
 
             # Select post links (adjust selector based on previous code: a.lnk.vstt)
@@ -123,16 +137,10 @@ class AVDBSClient:
             self.page.goto(post_url, timeout=60000)
             self.page.wait_for_load_state("domcontentloaded")
             
-            # Scroll to bottom to trigger lazy loading
-            for i in range(5):
-                self.page.mouse.wheel(0, 500)
-                self.page.wait_for_timeout(500)
-            
-            # Wait for any image to be present
-            try:
-                self.page.wait_for_selector(".view_content img, #bo_v_con img", timeout=5000)
-            except:
-                logger.warning("No images selector found immediately.")
+            # Check session
+            if "로그인" in self.page.title():
+                logger.error("Hit login page while trying to access post. Session invalid.")
+                return []
 
             # Selectors
             imgs = self.page.query_selector_all(".view_content img, #bo_v_con img")

@@ -29,8 +29,8 @@ def main():
     # 2. Boards to monitor
     # 2. Boards to monitor
     boards = [
-        {"name": "국산야동", "url": "https://www.avdbs.com/board/t50"},
-        {"name": "서양야동", "url": "https://www.avdbs.com/board/t22"}
+        {"name": "T50", "url": "https://www.avdbs.com/board/t50"},
+        {"name": "T22", "url": "https://www.avdbs.com/board/t22"}
     ]
     
     client = AVDBSClient(headless=True)
